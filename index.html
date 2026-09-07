@@ -1,0 +1,1609 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>屋根裏のけものたち</title>
+<!--
+	game.html(Godotが書き出した本体)を9:16の枠に収めて中央に置く包み。
+	改善意見のUIもここが持つ。
+
+	なぜHTML側が持つのか:
+	- Godotはキャンバスの外(PCで左右に空く余白)に描けない。余白を使うにはHTMLで描くしかない
+	- GodotのWeb版は LineEdit/TextEdit でスマホのソフトキーボードが素直に出ない
+	- ブラウザのタブが非アクティブだとGodotのループが間引かれるが、HTMLは普通に動く
+
+	ゲーム側(scripts/web_screen_reporter.gd)は「いまどの画面か」と「ビルド版」を
+	window.parent.yaneuraContext へ知らせるだけ。投稿の一覧・送信はこのページが行う。
+
+	PC(余白が十分)は右の余白に常時サイドパネル、スマホは浮動ボタン＋全画面シート。
+	切り替えはCSSのメディアクエリではなく、実際の余白幅をJSで測って body.dock を付け外しする
+	(ゲームの幅が 100vh*9/16 で決まるため、ビューポート幅だけでは判定できない)。
+-->
+<style>
+	:root {
+		--ink: #2a1a20;
+		--paper: #fdf6e8;
+		--paper-edge: #c9b9a6;
+		--muted: #6b5a52;
+		--fixed: #4f7a33;
+		--fixed-bg: #eef6e6;
+		--wontfix: #9a6a55;
+		--accent: #f6c0c8;
+		--dock-width: 340px;
+	}
+	html, body {
+		margin: 0;
+		height: 100%;
+		background: #17121f;
+		overflow: hidden;
+		font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+		color: var(--ink);
+	}
+	body { display: flex; align-items: center; justify-content: center; }
+
+	#game {
+		display: block;
+		border: 0;
+		height: 100vh;
+		width: min(100vw, calc(100vh * 9 / 16));
+		height: 100dvh;
+		width: min(100dvw, calc(100dvh * 9 / 16));
+		flex: 0 0 auto;
+	}
+
+	/* --- 意見パネル。PCでは右の余白に居座り、スマホでは全画面シートになる --- */
+	#fb-dock {
+		position: fixed;
+		box-sizing: border-box;
+		background: var(--paper);
+		border: 3px solid var(--ink);
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 14px;
+		z-index: 5;
+	}
+	/* スマホ: 既定は隠しておき、浮動ボタンで全画面シートとして出す */
+	#fb-dock {
+		inset: 0;
+		border-radius: 0;
+		display: none;
+	}
+	body.sheet-open #fb-dock { display: flex; }
+	/* PC: 右の余白に常時表示 */
+	body.dock #fb-dock {
+		display: flex;
+		inset: 12px 12px 12px auto;
+		width: var(--dock-width);
+		border-radius: 14px;
+	}
+	body.dock #fb-fab, body.dock #fb-dock-close { display: none; }
+
+	#fb-head { display: flex; align-items: baseline; gap: 8px; }
+	#fb-head h1 { margin: 0; font-size: 17px; }
+	#fb-dock-close {
+		margin-left: auto;
+		font: inherit;
+		font-size: 14px;
+		padding: 6px 12px;
+		border-radius: 999px;
+		border: 2px solid var(--ink);
+		background: #efe6d8;
+		cursor: pointer;
+	}
+	#fb-summary { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+	#fb-write, #im-write {
+		font: inherit;
+		font-size: 16px;
+		font-weight: 600;
+		padding: 12px;
+		border-radius: 999px;
+		border: 2px solid var(--ink);
+		background: var(--accent);
+		color: var(--ink);
+		cursor: pointer;
+	}
+	#im-write { background: #efe6d8; font-size: 15px; padding: 10px; }
+	#fb-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+	#fb-filters button {
+		font: inherit;
+		font-size: 12px;
+		padding: 5px 10px;
+		border-radius: 999px;
+		border: 2px solid var(--paper-edge);
+		background: #fffdf6;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	#fb-filters button.on {
+		border-color: var(--ink);
+		background: var(--ink);
+		color: var(--paper);
+		font-weight: 700;
+	}
+	#fb-filters button span { opacity: 0.75; }
+	#fb-filters button:disabled { opacity: 0.4; cursor: default; }
+	#fb-list {
+		flex: 1 1 auto;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	/* セルは「状態 → 本文 → 返答 → 文脈」の4段。本文がいちばん強く、文脈は最後に小さく。
+	   済んだものは読み返す必要がないのでグレーに沈め、未対応だけが目に入るようにする */
+	#fb-list li {
+		background: #fffdf6;
+		border: 2px solid var(--ink);
+		border-radius: 10px;
+		padding: 10px 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+	}
+	#fb-list li.fixed, #fb-list li.wontfix {
+		background: #f2f0ec;
+		border-color: #dcd7cf;
+	}
+	.fb-head { display: flex; align-items: center; gap: 8px; }
+	.fb-chip {
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		padding: 3px 9px;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--paper);
+		white-space: nowrap;
+	}
+	li.fixed .fb-chip, li.wontfix .fb-chip { background: #b5aea5; color: #fbfaf8; }
+	/* 「おまかせ」印。状態バッジの隣に並ぶが主役ではないので、塗らずに枠だけにする */
+	.fb-auto {
+		font-size: 11px;
+		font-weight: 700;
+		padding: 2px 8px;
+		border-radius: 999px;
+		border: 1.5px solid #7a5c86;
+		color: #7a5c86;
+		white-space: nowrap;
+	}
+	li.fixed .fb-auto, li.wontfix .fb-auto { border-color: #c9c3ba; color: #a9a29a; }
+	.fb-id {
+		margin-left: auto;
+		font-size: 11px;
+		color: #a9a29a;
+		font-variant-numeric: tabular-nums;
+	}
+	.fb-body {
+		margin: 0;
+		font-size: 14.5px;
+		line-height: 1.65;
+		white-space: pre-wrap;
+		color: var(--ink);
+	}
+	li.fixed .fb-body, li.wontfix .fb-body { color: #8d877f; }
+	.fb-reply {
+		margin: 0;
+		padding: 4px 0 4px 10px;
+		border-left: 3px solid #cfc9c1;
+		font-size: 12.5px;
+		line-height: 1.6;
+		color: #7e7870;
+	}
+	.fb-meta {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 5px;
+		font-size: 11.5px;
+		color: var(--muted);
+	}
+	li.fixed .fb-meta, li.wontfix .fb-meta { color: #a9a29a; }
+	.fb-screen {
+		padding: 2px 7px;
+		border-radius: 4px;
+		background: #efe6d8;
+		color: #6b5a52;
+		font-weight: 600;
+	}
+	li.fixed .fb-screen, li.wontfix .fb-screen { background: #e7e4df; color: #8d877f; }
+	.fb-sep { opacity: 0.45; }
+
+	/* --- 左の余白のデバッグパネル（?debug=1 のときだけ・PC専用） --- */
+	#dbg-dock {
+		position: fixed;
+		box-sizing: border-box;
+		inset: 12px auto 12px 12px;
+		width: var(--dock-width);
+		background: #23202b;
+		color: #e6e1ea;
+		border: 3px solid #0f0d14;
+		border-radius: 14px;
+		display: none;
+		flex-direction: column;
+		gap: 10px;
+		padding: 14px;
+		z-index: 5;
+		font-size: 12.5px;
+	}
+	body.debug #dbg-dock { display: flex; }
+	#dbg-head { display: flex; align-items: center; gap: 8px; }
+	#dbg-head h1 { margin: 0; font-size: 15px; color: #fff; }
+	#dbg-state { margin-left: auto; font-size: 11px; color: #8f869c; }
+	#dbg-state.live { color: #7ad48f; }
+	#dbg-tabs { display: flex; gap: 6px; }
+	#dbg-tabs button {
+		font: inherit;
+		font-size: 12px;
+		padding: 6px 12px;
+		border-radius: 999px;
+		border: 2px solid #3b3547;
+		background: transparent;
+		color: #a49bb0;
+		cursor: pointer;
+	}
+	#dbg-tabs button.on { background: #e6e1ea; border-color: #e6e1ea; color: #23202b; font-weight: 700; }
+	.dbg-pane { flex: 1 1 auto; overflow-y: auto; display: none; flex-direction: column; gap: 6px; }
+	.dbg-pane.on { display: flex; }
+	.dbg-user {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		background: #2c2836;
+		border-radius: 8px;
+		padding: 7px 10px;
+	}
+	.dbg-dot { width: 8px; height: 8px; border-radius: 50%; background: #7ad48f; flex: 0 0 auto; }
+	.dbg-name { font-weight: 700; color: #fff; }
+	.dbg-where { margin-left: auto; color: #a49bb0; }
+	.dbg-empty { color: #8f869c; padding: 6px 2px; }
+	.dbg-row {
+		display: flex;
+		gap: 8px;
+		align-items: baseline;
+		padding: 5px 2px;
+		border-bottom: 1px solid #322d3d;
+	}
+	.dbg-time { color: #7e7690; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+	.dbg-who { color: #b9a7d0; flex: 0 0 auto; }
+	.dbg-kind {
+		flex: 0 0 auto;
+		font-size: 10.5px;
+		padding: 1px 6px;
+		border-radius: 4px;
+		background: #3b3547;
+		color: #c6bdd4;
+	}
+	.dbg-text { color: #e6e1ea; }
+	.dbg-user, .dbg-player { cursor: pointer; }
+	.dbg-user:hover, .dbg-player:hover { background: #37324a; }
+	.dbg-player {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		background: #2c2836;
+		border-radius: 8px;
+		padding: 7px 10px;
+	}
+	.dbg-sub { color: #8f869c; font-size: 11px; }
+	.dbg-back {
+		font: inherit;
+		font-size: 12px;
+		align-self: flex-start;
+		padding: 5px 12px;
+		border-radius: 999px;
+		border: 2px solid #3b3547;
+		background: transparent;
+		color: #c6bdd4;
+		cursor: pointer;
+	}
+	.dbg-title { font-size: 15px; font-weight: 700; color: #fff; }
+	.dbg-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+	.dbg-facts dt { color: #8f869c; }
+	.dbg-facts dd { margin: 0; color: #e6e1ea; }
+	.dbg-section { color: #a49bb0; margin-top: 6px; border-bottom: 1px solid #322d3d; padding-bottom: 3px; }
+	.dbg-cards { display: flex; flex-wrap: wrap; gap: 4px; }
+	.dbg-card {
+		font-size: 11px;
+		padding: 2px 7px;
+		border-radius: 4px;
+		background: #34304180;
+		color: #cfc6da;
+	}
+
+	/* スマホ用の浮動ボタン。ゲームの上に重ねる */
+	#fb-fab {
+		position: fixed;
+		right: 12px;
+		bottom: 12px;
+		z-index: 6;
+		font: inherit;
+		font-size: 14px;
+		font-weight: 600;
+		padding: 10px 16px;
+		border-radius: 999px;
+		border: 2px solid var(--ink);
+		background: var(--paper);
+		color: var(--ink);
+		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+		cursor: pointer;
+	}
+
+	/* --- 書き込み欄（どちらの形でも共通で使うモーダル） --- */
+	#fb-backdrop {
+		position: fixed;
+		inset: 0;
+		display: none;
+		align-items: center;
+		justify-content: center;
+		background: rgba(12, 8, 18, 0.72);
+		z-index: 10;
+	}
+	body.compose-open #fb-backdrop { display: flex; }
+	#fb-panel {
+		width: min(88vw, 420px);
+		background: var(--paper);
+		border: 3px solid var(--ink);
+		border-radius: 14px;
+		padding: 18px;
+		box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	#fb-panel h2 { margin: 0; font-size: 18px; }
+	#fb-where, #fb-auto {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0;
+		font-size: 13px;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	#fb-where input, #fb-auto input {
+		width: 17px; height: 17px; accent-color: #7a5c86; margin: 0; flex: 0 0 auto;
+	}
+	#fb-auto { line-height: 1.5; }
+	#fb-auto.on { color: #7a5c86; font-weight: 600; }
+	#fb-where.unknown { opacity: 0.55; cursor: default; }
+	#fb-name, #fb-body {
+		width: 100%;
+		box-sizing: border-box;
+		font: inherit;
+		font-size: 16px; /* 16px未満だとiOSで勝手に拡大される */
+		color: var(--ink);
+		background: #fff;
+		border: 2px solid var(--paper-edge);
+		border-radius: 8px;
+		padding: 10px;
+	}
+	#fb-body { min-height: 130px; resize: vertical; line-height: 1.6; }
+	#fb-count { font-size: 12px; color: var(--muted); text-align: right; }
+	#fb-row { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+	#fb-error { font-size: 12.5px; color: #a8323f; margin-right: auto; }
+	#fb-row button {
+		font: inherit;
+		font-size: 15px;
+		font-weight: 600;
+		padding: 10px 18px;
+		border-radius: 999px;
+		border: 2px solid var(--ink);
+		cursor: pointer;
+	}
+	#fb-cancel { background: #efe6d8; color: var(--ink); }
+	#fb-send { background: var(--accent); color: var(--ink); }
+	#fb-send:disabled { opacity: 0.5; cursor: default; }
+
+	/* --- 絵の差し替え（画像＋メモを送る） ---
+	   選ぶ→添える→書く の3段を1枚に縦に並べる。段ごとにモーダルを重ねると
+	   「いま何を選んでいるのか」が見えなくなるため。 */
+	#im-write { margin-top: -4px; }
+	body.image-open #im-backdrop { display: flex; }
+	#im-backdrop {
+		position: fixed;
+		inset: 0;
+		display: none;
+		align-items: center;
+		justify-content: center;
+		background: rgba(12, 8, 18, 0.72);
+		z-index: 11;
+	}
+	#im-panel {
+		width: min(92vw, 480px);
+		max-height: 90vh;
+		overflow-y: auto;
+		background: var(--paper);
+		border: 3px solid var(--ink);
+		border-radius: 14px;
+		padding: 18px;
+		box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	/* パネル全体が縦に長いので、既定のまま置くと中の段が均等に縮んで格子が潰れる */
+	#im-panel > * { flex: 0 0 auto; }
+	#im-panel h2 { margin: 0; font-size: 18px; }
+	.im-step {
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--muted);
+		border-top: 1px dashed var(--paper-edge);
+		padding-top: 10px;
+	}
+	.im-step:first-of-type { border-top: 0; padding-top: 0; }
+	#im-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+	#im-tabs button {
+		font: inherit;
+		font-size: 12.5px;
+		padding: 6px 12px;
+		border-radius: 999px;
+		border: 2px solid var(--paper-edge);
+		background: #fff;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	#im-tabs button.on { border-color: var(--ink); background: var(--accent); color: var(--ink); font-weight: 700; }
+	#im-search {
+		width: 100%;
+		box-sizing: border-box;
+		font: inherit;
+		font-size: 16px;
+		border: 2px solid var(--paper-edge);
+		border-radius: 8px;
+		padding: 8px 10px;
+		background: #fff;
+		color: var(--ink);
+	}
+	#im-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+		gap: 6px;
+		height: 240px;
+		align-content: start;
+		overflow-y: auto;
+		padding: 4px;
+		background: #fff;
+		border: 2px solid var(--paper-edge);
+		border-radius: 8px;
+	}
+	#im-grid p { grid-column: 1 / -1; margin: 12px 4px; font-size: 12.5px; color: var(--muted); }
+	.im-cell {
+		border: 2px solid transparent;
+		border-radius: 6px;
+		padding: 3px;
+		background: none;
+		cursor: pointer;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
+	}
+	/* 透ける素材が白地に埋もれないよう、market風の格子を敷く */
+	.im-cell img {
+		width: 100%;
+		aspect-ratio: 1;
+		object-fit: contain;
+		background-color: #efe6d8;
+		background-image:
+			linear-gradient(45deg, #ddd2c0 25%, transparent 25%, transparent 75%, #ddd2c0 75%),
+			linear-gradient(45deg, #ddd2c0 25%, transparent 25%, transparent 75%, #ddd2c0 75%);
+		background-size: 12px 12px;
+		background-position: 0 0, 6px 6px;
+		border-radius: 4px;
+	}
+	.im-cell span {
+		font-size: 9.5px;
+		color: var(--muted);
+		line-height: 1.2;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.im-cell.on { border-color: var(--ink); background: var(--accent); }
+	.im-cell.on span { color: var(--ink); font-weight: 700; }
+	#im-chosen[hidden], #im-grid[hidden] { display: none; }
+	#im-chosen {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: 12.5px;
+		color: var(--muted);
+		background: #fff;
+		border: 2px solid var(--paper-edge);
+		border-radius: 8px;
+		padding: 8px 10px;
+	}
+	#im-chosen img { width: 44px; height: 44px; object-fit: contain; flex: 0 0 auto; }
+	#im-chosen b { display: block; color: var(--ink); font-size: 13px; word-break: break-all; }
+	#im-warn { font-size: 12px; color: #8a5a1f; background: #fbf1de; border-radius: 6px; padding: 6px 8px; }
+	#im-drop {
+		border: 2px dashed var(--paper-edge);
+		border-radius: 10px;
+		background: #fff;
+		padding: 14px;
+		text-align: center;
+		font-size: 13px;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	#im-drop.hover { border-color: var(--ink); background: var(--accent); }
+	#im-drop.has { padding: 8px; }
+	#im-preview { display: none; align-items: center; gap: 10px; justify-content: center; }
+	#im-preview.on { display: flex; }
+	#im-preview img { max-width: 96px; max-height: 96px; object-fit: contain; }
+	#im-preview .im-arrow { font-size: 20px; color: var(--muted); }
+	#im-file-info { font-size: 12px; color: var(--muted); }
+	#im-note, #im-name {
+		width: 100%;
+		box-sizing: border-box;
+		font: inherit;
+		font-size: 16px;
+		color: var(--ink);
+		background: #fff;
+		border: 2px solid var(--paper-edge);
+		border-radius: 8px;
+		padding: 10px;
+	}
+	#im-note { min-height: 84px; resize: vertical; line-height: 1.6; }
+	#im-row { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+	#im-error { font-size: 12.5px; color: #a8323f; margin-right: auto; }
+	#im-row button {
+		font: inherit;
+		font-size: 15px;
+		font-weight: 600;
+		padding: 10px 18px;
+		border-radius: 999px;
+		border: 2px solid var(--ink);
+		cursor: pointer;
+	}
+	#im-cancel { background: #efe6d8; color: var(--ink); }
+	#im-send { background: var(--accent); color: var(--ink); }
+	#im-send:disabled { opacity: 0.5; cursor: default; }
+	#im-sent { display: flex; flex-direction: column; gap: 6px; }
+	#im-sent div {
+		display: flex; gap: 8px; align-items: center;
+		font-size: 12px; color: var(--muted);
+	}
+	#im-sent img { width: 32px; height: 32px; object-fit: contain; border-radius: 4px; }
+	#im-sent .im-mark { font-weight: 700; flex: 0 0 auto; }
+	#im-sent .applied { color: var(--fixed); }
+</style>
+</head>
+<body>
+	<iframe id="game" src="game.html" title="屋根裏のけものたち" allow="autoplay; fullscreen"></iframe>
+
+	<button id="fb-fab" type="button">意見</button>
+
+	<aside id="dbg-dock">
+		<div id="dbg-head">
+			<h1>デバッグ</h1>
+			<span id="dbg-state">接続中…</span>
+		</div>
+		<div id="dbg-tabs">
+			<button type="button" data-pane="users" class="on">接続中 <span></span></button>
+			<button type="button" data-pane="log">行動ログ</button>
+			<button type="button" data-pane="players">ユーザー <span></span></button>
+		</div>
+		<div id="dbg-users" class="dbg-pane on"></div>
+		<div id="dbg-log" class="dbg-pane"></div>
+		<div id="dbg-players" class="dbg-pane"></div>
+		<div id="dbg-detail" class="dbg-pane"></div>
+	</aside>
+
+	<aside id="fb-dock">
+		<div id="fb-head">
+			<h1>みんなの意見</h1>
+			<button id="fb-dock-close" type="button">閉じる</button>
+		</div>
+		<p id="fb-summary">読み込み中…</p>
+		<button id="fb-write" type="button">改善してほしいことを書く</button>
+		<button id="im-write" type="button">絵を差し替えたい</button>
+		<div id="fb-filters" role="group" aria-label="絞り込み">
+			<button type="button" data-filter="all" class="on">すべて <span></span></button>
+			<button type="button" data-filter="open">未対応 <span></span></button>
+			<button type="button" data-filter="fixed">✓ 改善済み <span></span></button>
+			<button type="button" data-filter="wontfix">見送り <span></span></button>
+		</div>
+		<ul id="fb-list"></ul>
+	</aside>
+
+	<div id="im-backdrop" role="dialog" aria-modal="true" aria-labelledby="im-title">
+		<div id="im-panel">
+			<h2 id="im-title">絵を差し替えたい</h2>
+
+			<div class="im-step">① どの絵を差し替える？</div>
+			<div id="im-tabs" role="group" aria-label="絵の探し方">
+				<button type="button" data-tab="screen" class="on">この画面 <span></span></button>
+				<button type="button" data-tab="all">ぜんぶ</button>
+				<button type="button" data-tab="new">新しい絵として送る</button>
+			</div>
+			<input id="im-search" type="text" placeholder="名前で探す（例: 背景, battle）" autocomplete="off">
+			<div id="im-grid"></div>
+			<div id="im-chosen" hidden></div>
+			<div id="im-warn" hidden></div>
+
+			<div class="im-step">② 差し替える絵</div>
+			<div id="im-drop">
+				<span id="im-drop-text">画像をここに落とすか、押して選ぶ<br>（PNG / JPEG / WebP・8MBまで）</span>
+				<div id="im-preview">
+					<img id="im-preview-old" alt="いまの絵">
+					<span class="im-arrow">→</span>
+					<img id="im-preview-new" alt="送る絵">
+				</div>
+				<div id="im-file-info"></div>
+				<input id="im-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+			</div>
+
+			<div class="im-step">③ どう変えたいか</div>
+			<textarea id="im-note" maxlength="500"
+				placeholder="例: 背景が暗くて札が見づらいので、明るくしたものを描きました"></textarea>
+			<input id="im-name" type="text" maxlength="40" placeholder="お名前（任意）" autocomplete="off">
+			<div id="im-row">
+				<span id="im-error"></span>
+				<button id="im-cancel" type="button">やめる</button>
+				<button id="im-send" type="button" disabled>送る</button>
+			</div>
+
+			<div class="im-step" id="im-sent-head" hidden>送った絵</div>
+			<div id="im-sent"></div>
+		</div>
+	</div>
+
+	<div id="fb-backdrop" role="dialog" aria-modal="true" aria-labelledby="fb-title">
+		<div id="fb-panel">
+			<h2 id="fb-title">改善してほしいこと</h2>
+			<label id="fb-where">
+				<input id="fb-screen-on" type="checkbox" checked>
+				<span id="fb-screen-text"></span>
+			</label>
+			<label id="fb-auto">
+				<input id="fb-auto-on" type="checkbox">
+				<span>おまかせで直してOK（自動で開発を進めます）</span>
+			</label>
+			<input id="fb-name" type="text" maxlength="40" placeholder="お名前（任意）" autocomplete="off">
+			<textarea id="fb-body" maxlength="1000"
+				placeholder="気になったこと、遊びにくかったこと、こうしてほしいこと"></textarea>
+			<div id="fb-count">0 / 1000</div>
+			<div id="fb-row">
+				<span id="fb-error"></span>
+				<button id="fb-cancel" type="button">やめる</button>
+				<button id="fb-send" type="button" disabled>送る</button>
+			</div>
+		</div>
+	</div>
+
+<script>
+(function () {
+	const API_BASE = 'https://yaneura-test.matsumoto-takumi.workers.dev';
+	const DOCK_MIN_MARGIN = 364;  // 右の余白がこれ以上あるときだけ常時パネルにする
+
+	const body = document.body;
+	const dock = document.getElementById('fb-dock');
+	const summary = document.getElementById('fb-summary');
+	const list = document.getElementById('fb-list');
+	const nameInput = document.getElementById('fb-name');
+	const bodyInput = document.getElementById('fb-body');
+	const counter = document.getElementById('fb-count');
+	const where = document.getElementById('fb-where');
+	const screenToggle = document.getElementById('fb-screen-on');
+	const screenText = document.getElementById('fb-screen-text');
+	const autoWrap = document.getElementById('fb-auto');
+	const autoToggle = document.getElementById('fb-auto-on');
+	const errorLabel = document.getElementById('fb-error');
+	const sendButton = document.getElementById('fb-send');
+	const filterButtons = Array.prototype.slice.call(
+		document.querySelectorAll('#fb-filters button'));
+
+	// ゲーム側(web_screen_reporter.gd)が書き込む。無ければ空のまま投稿する
+	window.yaneuraContext = { screen: '', screenLabel: '', build: '' };
+
+	// いま画面に出ている絵の res:// パス。差し替え先を選ぶときの既定の候補になる。
+	// ゲーム側が1秒ごとに見て、変わったときだけ呼んでくる
+	window.yaneuraTextures = function (paths) {
+		onScreenPaths = Array.isArray(paths) ? paths : [];
+		if (body.classList.contains('image-open') && imageTab === 'screen') renderGrid();
+	};
+
+	// ゲームの幅は 100vh*9/16 で決まるので、余白はビューポート幅からは分からない。実測する
+	function updateLayoutMode() {
+		const game = document.getElementById('game');
+		const margin = (window.innerWidth - game.getBoundingClientRect().width) / 2;
+		const wide = margin >= DOCK_MIN_MARGIN;
+		body.classList.toggle('dock', wide);
+		// デバッグは ?debug=1 かつ余白がある(=PC)ときだけ
+		body.classList.toggle('debug', wide && watching);
+	}
+
+	// ビルド版の保存値は YYYY-MM-DD-N（並べ替えやすい機械向けの形）のまま。
+	// 末尾の数字が何なのか読み手に伝わらないので、表示のときだけ「日付 (#N)」に開く
+	function formatBuild(build) {
+		const matched = /^(\d{4}-\d{2}-\d{2})-(\d+)$/.exec(build || '');
+		return matched ? matched[1] + ' (#' + matched[2] + ')' : (build || '');
+	}
+
+	function badgeOf(status) {
+		if (status === 'fixed') return { text: '✓ 改善済み', cls: 'fixed' };
+		if (status === 'wontfix') return { text: '見送り', cls: 'wontfix' };
+		return { text: '未対応', cls: 'open' };
+	}
+
+	let allItems = [];
+	let filter = 'all';
+	let lastBuild = '';
+
+	// 全件は allItems に持っておき、絞り込みは表示側だけで行う（読み直さない）
+	function render() {
+		lastBuild = window.yaneuraContext.build;
+		const counts = { all: allItems.length, open: 0, fixed: 0, wontfix: 0 };
+		allItems.forEach(function (item) {
+			const key = item.status || 'open';
+			if (counts[key] !== undefined) counts[key] += 1;
+		});
+		filterButtons.forEach(function (button) {
+			const key = button.dataset.filter;
+			button.querySelector('span').textContent = counts[key];
+			button.classList.toggle('on', key === filter);
+			button.disabled = key !== 'all' && counts[key] === 0;
+		});
+		const items = filter === 'all'
+			? allItems
+			: allItems.filter(function (item) { return (item.status || 'open') === filter; });
+		list.textContent = '';
+		items.forEach(function (item) {
+			const badge = badgeOf(item.status);
+			const li = document.createElement('li');
+			li.className = badge.cls;
+
+			// 1段目: 状態と通し番号（番号は「この意見を直した」と伝えるときの目印）
+			const head = document.createElement('div');
+			head.className = 'fb-head';
+			const chip = document.createElement('span');
+			chip.className = 'fb-chip';
+			chip.textContent = badge.text;
+			head.appendChild(chip);
+			// 「おまかせ」は誰が見ても分かる印にしておく（自動で直しに行くのはローカルのClaude）
+			if (item.auto_dev) {
+				const auto = document.createElement('span');
+				auto.className = 'fb-auto';
+				auto.textContent = 'おまかせ';
+				head.appendChild(auto);
+			}
+			const id = document.createElement('span');
+			id.className = 'fb-id';
+			id.textContent = '#' + item.id;
+			head.appendChild(id);
+			li.appendChild(head);
+
+			// 2段目: 本文。ここがいちばん読まれるので大きく濃く
+			const text = document.createElement('p');
+			text.className = 'fb-body';
+			text.textContent = item.body || '';
+			li.appendChild(text);
+
+			// 3段目: 返答（直したときだけ）。引用のように縦線を引いて本文と分ける
+			if (item.fixed_note) {
+				const note = document.createElement('p');
+				note.className = 'fb-reply';
+				note.textContent = item.fixed_note
+					+ (item.fixed_build ? '（' + formatBuild(item.fixed_build) + ' で反映）' : '');
+				li.appendChild(note);
+			}
+
+			// 4段目: 文脈。画面名だけタグにして拾いやすくする
+			const meta = document.createElement('div');
+			meta.className = 'fb-meta';
+			const screen = document.createElement('span');
+			screen.className = 'fb-screen';
+			screen.textContent = item.screen || '画面なし';
+			meta.appendChild(screen);
+			[formatBuild(item.build), item.name].filter(function (v) { return v; })
+				.forEach(function (value) {
+					const sep = document.createElement('span');
+					sep.className = 'fb-sep';
+					sep.textContent = '・';
+					meta.appendChild(sep);
+					const span = document.createElement('span');
+					span.textContent = value;
+					meta.appendChild(span);
+				});
+			li.appendChild(meta);
+			list.appendChild(li);
+		});
+		const build = window.yaneuraContext.build;
+		if (allItems.length === 0) {
+			summary.textContent = 'まだ意見はありません。最初のひとことをどうぞ';
+		} else if (items.length === 0) {
+			summary.textContent = 'この絞り込みに合う意見はありません';
+		} else {
+			summary.textContent = build ? 'このビルド: ' + formatBuild(build) : '';
+		}
+	}
+
+	async function refresh() {
+		summary.textContent = '読み込み中…';
+		try {
+			const data = await fetch(API_BASE + '/api/feedback').then(function (r) {
+				if (!r.ok) throw new Error(String(r.status));
+				return r.json();
+			});
+			allItems = data.items || [];
+			render();
+		} catch (err) {
+			summary.textContent = '読み込めませんでした（' + err.message + '）';
+		}
+	}
+
+	function refreshCompose() {
+		counter.textContent = bodyInput.value.length + ' / 1000';
+		sendButton.disabled = bodyInput.value.trim().length === 0;
+	}
+
+	function openCompose() {
+		// 「どの画面の話か」は後から読む側にいちばん効くので、既定で入れておく。
+		// 画面と関係ない意見のときはチェックを外して送らないこともできる
+		const label = window.yaneuraContext.screenLabel || window.yaneuraContext.screen;
+		const known = Boolean(label);
+		screenText.textContent = known
+			? ('いまの画面「' + label + '」を一緒に送る')
+			: 'いまの画面が取れませんでした';
+		screenToggle.checked = known;
+		screenToggle.disabled = !known;
+		where.classList.toggle('unknown', !known);
+		// 「おまかせ」は既定オフ。毎回チェックし直すのは面倒なので前回の選択を覚えておく
+		autoToggle.checked = localStorage.getItem('yaneura-auto-dev') === '1';
+		autoWrap.classList.toggle('on', autoToggle.checked);
+		// 名前は一度書いたら覚えておく。毎回打ち直すのが面倒との声(#6)
+		if (nameInput.value.trim().length === 0) {
+			nameInput.value = localStorage.getItem('yaneura-name') || '';
+		}
+		errorLabel.textContent = '';
+		body.classList.add('compose-open');
+		refreshCompose();
+		setTimeout(function () { bodyInput.focus(); }, 30);
+	}
+
+	function closeCompose() {
+		body.classList.remove('compose-open');
+	}
+
+	async function send() {
+		const text = bodyInput.value.trim();
+		if (text.length === 0) return;
+		sendButton.disabled = true;
+		errorLabel.textContent = '送信中…';
+		try {
+			const result = await fetch(API_BASE + '/api/feedback', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					name: (function () {
+						const value = nameInput.value.trim();
+						if (value) localStorage.setItem('yaneura-name', value);  // 次から表示名に使う
+						return value;
+					}()),
+					body: text,
+					screen: screenToggle.checked ? window.yaneuraContext.screen : '',
+					build: window.yaneuraContext.build,
+					auto_dev: autoToggle.checked,
+				}),
+			}).then(function (r) { return r.json(); });
+			if (result.error) throw new Error(result.error);
+			bodyInput.value = '';
+			closeCompose();
+			refresh();
+		} catch (err) {
+			errorLabel.textContent = err.message;
+		} finally {
+			refreshCompose();
+		}
+	}
+
+	// --- 絵の差し替え（画像＋メモ） -------------------------------------------
+	//
+	// 「どの絵を」を人に文章で書かせない。ゲームが報告してくる「いま映っている絵」を
+	// サムネイルで並べて押させる。押した時点で res:// のパスが確定するので、
+	// 受け取る側(assets.sh)は置き場所を推測しなくて済む。
+	//
+	// サムネイルはpckの中を見られないので別に用意してある
+	// （tools/make_asset_manifest.py が assets/index.json と assets/thumb/ を書き出す）。
+
+	const imGrid = document.getElementById('im-grid');
+	const imSearch = document.getElementById('im-search');
+	const imChosen = document.getElementById('im-chosen');
+	const imWarn = document.getElementById('im-warn');
+	const imDrop = document.getElementById('im-drop');
+	const imDropText = document.getElementById('im-drop-text');
+	const imPreview = document.getElementById('im-preview');
+	const imPreviewOld = document.getElementById('im-preview-old');
+	const imPreviewNew = document.getElementById('im-preview-new');
+	const imFile = document.getElementById('im-file');
+	const imFileInfo = document.getElementById('im-file-info');
+	const imNote = document.getElementById('im-note');
+	const imName = document.getElementById('im-name');
+	const imError = document.getElementById('im-error');
+	const imSend = document.getElementById('im-send');
+	const imSent = document.getElementById('im-sent');
+	const imSentHead = document.getElementById('im-sent-head');
+	const imTabs = Array.prototype.slice.call(document.querySelectorAll('#im-tabs button'));
+	const IM_MAX_BYTES = 8 * 1024 * 1024;
+
+	let onScreenPaths = [];
+	let assetIndex = null;      // assets/index.json の中身（一度読んだら使い回す）
+	let assetByPath = {};
+	let imageTab = 'screen';
+	let chosen = null;          // 差し替え先の1件。null なら「新しい絵」
+	let picked = null;          // 送る画像 { file, url, w, h }
+
+	async function loadAssetIndex() {
+		if (assetIndex) return assetIndex;
+		try {
+			const data = await fetch('assets/index.json', { cache: 'no-cache' })
+				.then(function (r) { return r.json(); });
+			assetIndex = data.assets || [];
+		} catch (err) {
+			assetIndex = [];
+		}
+		// ゲームが報告してくるのは書き出し後のパス(res://.godot/imported/....ctex)なので、
+		// 素材のパスと書き出し後のパスの両方から同じ1件を引けるようにしておく
+		assetByPath = {};
+		assetIndex.forEach(function (item) {
+			assetByPath[item.path] = item;
+			if (item.ctex) assetByPath[item.ctex] = item;
+		});
+		return assetIndex;
+	}
+
+	function renderGrid() {
+		const items = assetIndex || [];
+		imSearch.hidden = imageTab !== 'all';
+		if (imageTab === 'new') {
+			imGrid.hidden = true;
+			return;
+		}
+		imGrid.hidden = false;
+		let shown;
+		if (imageTab === 'screen') {
+			// ゲームが報告した順ではなく素材の並び順で出す（同じ画面なら毎回同じ位置に出る）
+			const onScreen = {};
+			onScreenPaths.forEach(function (path) {
+				const item = assetByPath[path];
+				if (item) onScreen[item.path] = true;
+			});
+			shown = items.filter(function (item) { return onScreen[item.path]; });
+		} else {
+			const query = imSearch.value.trim().toLowerCase();
+			shown = query.length === 0 ? items : items.filter(function (item) {
+				return (item.name + ' ' + item.dir + ' ' + item.group).toLowerCase().indexOf(query) >= 0;
+			});
+			shown = shown.slice(0, 300);   // 出しすぎると探すより見るのが大変になる
+		}
+		imGrid.textContent = '';
+		if (shown.length === 0) {
+			const empty = document.createElement('p');
+			empty.textContent = imageTab === 'screen'
+				? 'いま映っている絵をゲームから受け取れていません。「ぜんぶ」から探してください。'
+				: '見つかりませんでした。';
+			imGrid.appendChild(empty);
+			return;
+		}
+		shown.forEach(function (item) {
+			const cell = document.createElement('button');
+			cell.type = 'button';
+			cell.className = 'im-cell' + (chosen && chosen.path === item.path ? ' on' : '');
+			cell.title = item.group + ' / ' + item.name + '（' + item.w + '×' + item.h + '）';
+			const img = document.createElement('img');
+			img.src = item.thumb;
+			img.loading = 'lazy';
+			img.alt = item.name;
+			const label = document.createElement('span');
+			label.textContent = item.name.replace(/\.(png|jpe?g|webp)$/i, '');
+			cell.appendChild(img);
+			cell.appendChild(label);
+			cell.dataset.path = item.path;
+			cell.addEventListener('click', function () { choose(item); });
+			imGrid.appendChild(cell);
+		});
+	}
+
+	function choose(item) {
+		chosen = item;
+		imChosen.hidden = false;
+		imChosen.textContent = '';
+		const img = document.createElement('img');
+		img.src = item.thumb;
+		img.alt = '';
+		const text = document.createElement('div');
+		const strong = document.createElement('b');
+		strong.textContent = item.name;
+		text.appendChild(strong);
+		text.appendChild(document.createTextNode(
+			item.group + ' ／ 原寸 ' + item.w + '×' + item.h));
+		imChosen.appendChild(img);
+		imChosen.appendChild(text);
+		// 差し替え後の絵は原寸に合わせてもらうのがいちばん事故が少ない
+		imWarn.hidden = !item.generated;
+		if (item.generated) {
+			imWarn.textContent = 'この絵は札のPSDから自動で切り出しているので、'
+				+ '送ってもらった絵をそのまま入れることはできません。'
+				+ '「こう変えたい」の見本として受け取り、PSD側を直します。';
+		}
+		imPreviewOld.src = item.thumb;
+		Array.prototype.forEach.call(imGrid.children, function (cell) {
+			if (cell.dataset) cell.classList.toggle('on', cell.dataset.path === item.path);
+		});
+		refreshImage();
+	}
+
+	function clearChoice() {
+		chosen = null;
+		Array.prototype.forEach.call(imGrid.children, function (cell) {
+			cell.classList && cell.classList.remove('on');
+		});
+		imChosen.hidden = true;
+		imWarn.hidden = true;
+		imPreviewOld.removeAttribute('src');
+		refreshImage();
+	}
+
+	function setPicked(file) {
+		imError.textContent = '';
+		if (!file) return;
+		if (['image/png', 'image/jpeg', 'image/webp'].indexOf(file.type) < 0) {
+			imError.textContent = 'PNG / JPEG / WebP のどれかで送ってください';
+			return;
+		}
+		if (file.size > IM_MAX_BYTES) {
+			imError.textContent = '画像は8MBまでです';
+			return;
+		}
+		if (picked) URL.revokeObjectURL(picked.url);
+		picked = { file: file, url: URL.createObjectURL(file), w: 0, h: 0 };
+		imPreviewNew.src = picked.url;
+		imPreview.classList.add('on');
+		imDrop.classList.add('has');
+		imDropText.hidden = true;
+		// 大きさは送るときに一緒に渡す（原寸と合っているかを受け取る側で見たいため）
+		const probe = new Image();
+		probe.onload = function () {
+			picked.w = probe.naturalWidth;
+			picked.h = probe.naturalHeight;
+			let text = file.name + '（' + probe.naturalWidth + '×' + probe.naturalHeight
+				+ '・' + Math.round(file.size / 1024) + 'KB）';
+			if (chosen && (probe.naturalWidth !== chosen.w || probe.naturalHeight !== chosen.h)) {
+				text += ' ※ いまの絵は ' + chosen.w + '×' + chosen.h + ' です';
+			}
+			imFileInfo.textContent = text;
+		};
+		probe.src = picked.url;
+		refreshImage();
+	}
+
+	function refreshImage() {
+		imSend.disabled = !(picked && imNote.value.trim().length > 0);
+	}
+
+	async function openImage() {
+		if (imName.value.trim().length === 0) {
+			imName.value = localStorage.getItem('yaneura-name') || '';
+		}
+		imError.textContent = '';
+		body.classList.add('image-open');
+		await loadAssetIndex();
+		// 「この画面」に候補が無いなら最初から「ぜんぶ」を開く（空の格子を見せない）
+		const onScreenCount = onScreenPaths.filter(function (path) {
+			return Boolean(assetByPath[path]);
+		}).length;
+		imTabs[0].querySelector('span').textContent = onScreenCount > 0 ? '(' + onScreenCount + ')' : '';
+		setTab(onScreenCount > 0 ? 'screen' : 'all');
+		refreshSentList();
+	}
+
+	function setTab(name) {
+		imageTab = name;
+		imTabs.forEach(function (button) {
+			button.classList.toggle('on', button.dataset.tab === name);
+		});
+		if (name === 'new') clearChoice();
+		renderGrid();
+	}
+
+	function closeImage() {
+		body.classList.remove('image-open');
+	}
+
+	async function sendImage() {
+		if (!picked) return;
+		imSend.disabled = true;
+		imError.textContent = '送信中…';
+		try {
+			const form = new FormData();
+			form.append('file', picked.file, picked.file.name);
+			form.append('note', imNote.value.trim());
+			form.append('target', chosen ? chosen.path : '');
+			form.append('screen', window.yaneuraContext.screen || '');
+			form.append('build', window.yaneuraContext.build || '');
+			form.append('width', String(picked.w));
+			form.append('height', String(picked.h));
+			const value = imName.value.trim();
+			if (value) localStorage.setItem('yaneura-name', value);
+			form.append('name', value);
+			const result = await fetch(API_BASE + '/api/assets', { method: 'POST', body: form })
+				.then(function (r) { return r.json(); });
+			if (result.error) throw new Error(result.error);
+			imNote.value = '';
+			URL.revokeObjectURL(picked.url);
+			picked = null;
+			imPreview.classList.remove('on');
+			imDrop.classList.remove('has');
+			imDropText.hidden = false;
+			imFileInfo.textContent = '';
+			imFile.value = '';
+			clearChoice();
+			closeImage();
+			refreshSentList();
+		} catch (err) {
+			imError.textContent = err.message;
+		} finally {
+			refreshImage();
+		}
+	}
+
+	// 送った絵がどうなったか。意見と同じで、返事が見えないと次を送る気にならない
+	async function refreshSentList() {
+		let items = [];
+		try {
+			const data = await fetch(API_BASE + '/api/assets', { cache: 'no-store' })
+				.then(function (r) { return r.json(); });
+			items = data.items || [];
+		} catch (err) {
+			items = [];
+		}
+		imSent.textContent = '';
+		imSentHead.hidden = items.length === 0;
+		items.slice(0, 8).forEach(function (item) {
+			const row = document.createElement('div');
+			const img = document.createElement('img');
+			img.src = API_BASE + '/api/assets/' + item.id + '/file';
+			img.loading = 'lazy';
+			img.alt = '';
+			const mark = document.createElement('span');
+			mark.className = 'im-mark' + (item.status === 'applied' ? ' applied' : '');
+			mark.textContent = item.status === 'applied' ? '✓ 入りました'
+				: (item.status === 'wontfix' ? '見送り' : '未対応');
+			const text = document.createElement('span');
+			const target = item.target ? item.target.replace('res://assets/', '') : '新しい絵';
+			text.textContent = target + '：' + (item.applied_note || item.note);
+			row.appendChild(img);
+			row.appendChild(mark);
+			row.appendChild(text);
+			imSent.appendChild(row);
+		});
+	}
+
+	imTabs.forEach(function (button) {
+		button.addEventListener('click', function () { setTab(button.dataset.tab); });
+	});
+	imSearch.addEventListener('input', renderGrid);
+	imNote.addEventListener('input', refreshImage);
+	imDrop.addEventListener('click', function () { imFile.click(); });
+	imFile.addEventListener('change', function () { setPicked(imFile.files[0]); });
+	['dragenter', 'dragover'].forEach(function (kind) {
+		imDrop.addEventListener(kind, function (event) {
+			event.preventDefault();
+			imDrop.classList.add('hover');
+		});
+	});
+	['dragleave', 'drop'].forEach(function (kind) {
+		imDrop.addEventListener(kind, function (event) {
+			event.preventDefault();
+			imDrop.classList.remove('hover');
+		});
+	});
+	imDrop.addEventListener('drop', function (event) {
+		if (event.dataTransfer && event.dataTransfer.files.length > 0) {
+			setPicked(event.dataTransfer.files[0]);
+		}
+	});
+	// 描いた絵をコピーしてそのまま貼れるように（画像編集ソフトからの持ち込みが一番多いはず）
+	document.addEventListener('paste', function (event) {
+		if (!body.classList.contains('image-open') || !event.clipboardData) return;
+		const items = Array.prototype.slice.call(event.clipboardData.items);
+		const image = items.filter(function (i) { return i.type.indexOf('image/') === 0; })[0];
+		if (image) setPicked(image.getAsFile());
+	});
+	document.getElementById('im-write').addEventListener('click', openImage);
+	document.getElementById('im-cancel').addEventListener('click', closeImage);
+	imSend.addEventListener('click', sendImage);
+	document.getElementById('im-backdrop').addEventListener('click', function (event) {
+		if (event.target.id === 'im-backdrop') closeImage();  // 枠の外で閉じる（書きかけは残す）
+	});
+
+	autoToggle.addEventListener('change', function () {
+		localStorage.setItem('yaneura-auto-dev', autoToggle.checked ? '1' : '0');
+		autoWrap.classList.toggle('on', autoToggle.checked);
+	});
+	bodyInput.addEventListener('input', refreshCompose);
+	document.getElementById('fb-write').addEventListener('click', openCompose);
+	document.getElementById('fb-cancel').addEventListener('click', closeCompose);
+	sendButton.addEventListener('click', send);
+	document.getElementById('fb-backdrop').addEventListener('click', function (event) {
+		if (event.target.id === 'fb-backdrop') closeCompose();  // 枠の外で閉じる(書きかけは残す)
+	});
+	document.getElementById('fb-fab').addEventListener('click', function () {
+		body.classList.add('sheet-open');
+		refresh();
+	});
+	document.getElementById('fb-dock-close').addEventListener('click', function () {
+		body.classList.remove('sheet-open');
+	});
+
+	filterButtons.forEach(function (button) {
+		button.addEventListener('click', function () {
+			filter = button.dataset.filter;
+			render();
+		});
+	});
+
+	// --- 在席と行動ログ（WebSocket + Durable Object） ---------------------------
+	//
+	// 接続そのものが在席なので、心拍も期限切れ判定も要らない。切れた瞬間に相手側で
+	// webSocketClose が起きて一覧から消える。デバッグパネルは ?debug=1 のときだけ出す
+	// （テスターの画面を狭めず、他人の行動ログも見せないため）。
+
+	const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
+	const watching = new URLSearchParams(location.search).get('debug') === '1';
+	const dbgState = document.getElementById('dbg-state');
+	const dbgUsers = document.getElementById('dbg-users');
+	const dbgLog = document.getElementById('dbg-log');
+	const dbgPlayers = document.getElementById('dbg-players');
+	const dbgDetail = document.getElementById('dbg-detail');
+	const dbgTabs = Array.prototype.slice.call(document.querySelectorAll('#dbg-tabs button'));
+	let socket = null;
+	let retryDelay = 1000;
+	let sentScreen = '';
+	let sentBuild = '';
+	let logEntries = [];
+
+	// 誰の行動かを見分けるための印。ログインの仕組みが無いのでブラウザごとに配る
+	function sessionId() {
+		let id = localStorage.getItem('yaneura-session');
+		if (!id) {
+			id = Math.random().toString(36).slice(2, 8).toUpperCase();
+			localStorage.setItem('yaneura-session', id);
+		}
+		return id;
+	}
+
+	function sessionName() {
+		return localStorage.getItem('yaneura-name') || '';
+	}
+
+	function sendSocket(payload) {
+		if (socket && socket.readyState === WebSocket.OPEN) {
+			socket.send(JSON.stringify(payload));
+		}
+	}
+
+	function timeOf(ms) {
+		const d = new Date(ms);
+		return String(d.getHours()).padStart(2, '0') + ':'
+			+ String(d.getMinutes()).padStart(2, '0') + ':'
+			+ String(d.getSeconds()).padStart(2, '0');
+	}
+
+	function renderUsers(users) {
+		dbgTabs[0].querySelector('span').textContent = users.length;
+		dbgUsers.textContent = '';
+		if (users.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'dbg-empty';
+			empty.textContent = '誰もつないでいません';
+			dbgUsers.appendChild(empty);
+			return;
+		}
+		users.forEach(function (user) {
+			const row = document.createElement('div');
+			row.className = 'dbg-user';
+			const dot = document.createElement('span');
+			dot.className = 'dbg-dot';
+			row.appendChild(dot);
+			const name = document.createElement('span');
+			name.className = 'dbg-name';
+			name.textContent = user.name || user.id;
+			row.appendChild(name);
+			const where = document.createElement('span');
+			where.className = 'dbg-where';
+			where.textContent = user.label || user.screen || '—';
+			row.appendChild(where);
+			row.addEventListener('click', function () { openPlayer(user.id); });
+			dbgUsers.appendChild(row);
+		});
+	}
+
+	function appendLog(entry, prepend) {
+		const row = document.createElement('div');
+		row.className = 'dbg-row';
+		const time = document.createElement('span');
+		time.className = 'dbg-time';
+		time.textContent = timeOf(entry.at);
+		row.appendChild(time);
+		const who = document.createElement('span');
+		who.className = 'dbg-who';
+		who.textContent = entry.name || entry.id || '?';
+		row.appendChild(who);
+		const kind = document.createElement('span');
+		kind.className = 'dbg-kind';
+		kind.textContent = entry.kind === 'screen' ? '画面' : entry.kind;
+		row.appendChild(kind);
+		const text = document.createElement('span');
+		text.className = 'dbg-text';
+		text.textContent = entry.text || '';
+		row.appendChild(text);
+		if (prepend && dbgLog.firstChild) {
+			dbgLog.insertBefore(row, dbgLog.firstChild);
+		} else {
+			dbgLog.appendChild(row);
+		}
+	}
+
+	function renderLog() {
+		dbgLog.textContent = '';
+		if (logEntries.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'dbg-empty';
+			empty.textContent = 'まだ記録がありません';
+			dbgLog.appendChild(empty);
+			return;
+		}
+		logEntries.slice().reverse().forEach(function (entry) { appendLog(entry, false); });
+	}
+
+	function connect() {
+		socket = new WebSocket(WS_URL);
+		socket.addEventListener('open', function () {
+			retryDelay = 1000;
+			dbgState.textContent = 'つながっています';
+			dbgState.classList.add('live');
+			sendSocket({ t: 'hello', id: sessionId(), name: sessionName(),
+				build: window.yaneuraContext.build });
+			if (watching) {
+				sendSocket({ t: 'watch' });
+			}
+			sentScreen = '';  // つなぎ直したら今いる画面をもう一度知らせる
+			sentBuild = window.yaneuraContext.build;
+		});
+		socket.addEventListener('message', function (event) {
+			const message = JSON.parse(event.data);
+			if (message.t === 'snapshot') {
+				renderUsers(message.users || []);
+				logEntries = message.events || [];
+				renderLog();
+			} else if (message.t === 'presence') {
+				renderUsers(message.users || []);
+			} else if (message.t === 'event') {
+				logEntries.push(message.event);
+				if (logEntries.length > 200) logEntries.shift();
+				if (dbgLog.querySelector('.dbg-empty')) dbgLog.textContent = '';
+				appendLog(message.event, true);
+			}
+		});
+		socket.addEventListener('close', function () {
+			dbgState.textContent = '切れました。つなぎ直します';
+			dbgState.classList.remove('live');
+			setTimeout(connect, retryDelay);
+			retryDelay = Math.min(retryDelay * 2, 15000);  // 落ちている間に叩き続けない
+		});
+		socket.addEventListener('error', function () { socket.close(); });
+	}
+
+	// ゲーム側から届く通貨と保有カードの控え。台帳へ流す
+	window.yaneuraState = function (state) {
+		sendSocket(Object.assign({ t: 'state' }, state));
+	};
+
+	// ゲーム側(web_screen_reporter.gd)から呼ばれる出来事の記録
+	window.yaneuraLog = function (kind, text) {
+		sendSocket({ t: 'event', kind: String(kind || 'other'), text: String(text || '') });
+	};
+
+	// --- 台帳（登録されたテスターの一覧と詳細） ---------------------------------
+	// 在席は接続の話、こちらは繋がっていない人も含めた記録。取得はHTTPで行う
+
+	function showPane(name) {
+		dbgTabs.forEach(function (button) {
+			button.classList.toggle('on', button.dataset.pane === name);
+		});
+		dbgUsers.classList.toggle('on', name === 'users');
+		dbgLog.classList.toggle('on', name === 'log');
+		dbgPlayers.classList.toggle('on', name === 'players');
+		dbgDetail.classList.toggle('on', name === 'detail');
+	}
+
+	function fact(list, label, value) {
+		const dt = document.createElement('dt');
+		dt.textContent = label;
+		const dd = document.createElement('dd');
+		dd.textContent = value;
+		list.appendChild(dt);
+		list.appendChild(dd);
+	}
+
+	function shortTime(text) {
+		return text ? String(text).replace('T', ' ').slice(0, 16) : '—';
+	}
+
+	async function openPlayer(id) {
+		showPane('detail');
+		dbgDetail.textContent = '読み込み中…';
+		let data;
+		try {
+			data = await fetch(API_BASE + '/api/players/' + encodeURIComponent(id))
+				.then(function (r) { return r.json(); });
+		} catch (err) {
+			dbgDetail.textContent = '読み込めませんでした';
+			return;
+		}
+		if (data.error) {
+			dbgDetail.textContent = data.error;
+			return;
+		}
+		dbgDetail.textContent = '';
+		const back = document.createElement('button');
+		back.className = 'dbg-back';
+		back.type = 'button';
+		back.textContent = '← 戻る';
+		back.addEventListener('click', function () { showPane('players'); });
+		dbgDetail.appendChild(back);
+
+		const player = data.player;
+		const title = document.createElement('div');
+		title.className = 'dbg-title';
+		title.textContent = player.name || player.id;
+		dbgDetail.appendChild(title);
+
+		const facts = document.createElement('dl');
+		facts.className = 'dbg-facts';
+		fact(facts, 'ID', player.id);
+		fact(facts, '登録日', shortTime(player.first_seen));
+		fact(facts, '最終', shortTime(player.last_seen));
+		fact(facts, 'ログイン', player.visits + ' 回');
+		fact(facts, 'ビルド', formatBuild(player.build) || '—');
+		fact(facts, '木の葉', player.leaves === null ? '—' : player.leaves);
+		fact(facts, '王冠', player.crowns === null ? '—' : player.crowns);
+		fact(facts, '保有カード', (player.card_kinds ?? 0) + ' 種 / ' + (player.card_total ?? 0) + ' 枚');
+		dbgDetail.appendChild(facts);
+
+		const cardIds = Object.keys(player.cards || {});
+		const cardsHead = document.createElement('div');
+		cardsHead.className = 'dbg-section';
+		cardsHead.textContent = '保有カード';
+		dbgDetail.appendChild(cardsHead);
+		if (cardIds.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'dbg-empty';
+			empty.textContent = 'まだ持っていません';
+			dbgDetail.appendChild(empty);
+		} else {
+			const wrap = document.createElement('div');
+			wrap.className = 'dbg-cards';
+			cardIds.forEach(function (cardId) {
+				const chip = document.createElement('span');
+				chip.className = 'dbg-card';
+				chip.textContent = cardId + ' ×' + player.cards[cardId];
+				wrap.appendChild(chip);
+			});
+			dbgDetail.appendChild(wrap);
+		}
+
+		const logHead = document.createElement('div');
+		logHead.className = 'dbg-section';
+		logHead.textContent = '行動履歴';
+		dbgDetail.appendChild(logHead);
+		if ((data.events || []).length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'dbg-empty';
+			empty.textContent = 'まだ記録がありません';
+			dbgDetail.appendChild(empty);
+		} else {
+			data.events.forEach(function (entry) {
+				const row = document.createElement('div');
+				row.className = 'dbg-row';
+				const time = document.createElement('span');
+				time.className = 'dbg-time';
+				time.textContent = shortTime(entry.at).slice(5);
+				row.appendChild(time);
+				const kind = document.createElement('span');
+				kind.className = 'dbg-kind';
+				kind.textContent = entry.kind === 'screen' ? '画面' : entry.kind;
+				row.appendChild(kind);
+				const text = document.createElement('span');
+				text.className = 'dbg-text';
+				text.textContent = entry.text || '';
+				row.appendChild(text);
+				dbgDetail.appendChild(row);
+			});
+		}
+	}
+
+	async function refreshPlayers() {
+		dbgPlayers.textContent = '読み込み中…';
+		let data;
+		try {
+			data = await fetch(API_BASE + '/api/players').then(function (r) { return r.json(); });
+		} catch (err) {
+			dbgPlayers.textContent = '読み込めませんでした';
+			return;
+		}
+		const items = data.items || [];
+		dbgTabs[2].querySelector('span').textContent = items.length;
+		dbgPlayers.textContent = '';
+		if (items.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'dbg-empty';
+			empty.textContent = 'まだ誰も遊んでいません';
+			dbgPlayers.appendChild(empty);
+			return;
+		}
+		items.forEach(function (item) {
+			const row = document.createElement('div');
+			row.className = 'dbg-player';
+			const name = document.createElement('span');
+			name.className = 'dbg-name';
+			name.textContent = item.name || item.id;
+			row.appendChild(name);
+			const sub = document.createElement('span');
+			sub.className = 'dbg-sub';
+			sub.textContent = item.visits + '回 ・ ' + shortTime(item.last_seen);
+			row.appendChild(sub);
+			row.addEventListener('click', function () { openPlayer(item.id); });
+			dbgPlayers.appendChild(row);
+		});
+	}
+
+	dbgTabs.forEach(function (button) {
+		button.addEventListener('click', function () {
+			showPane(button.dataset.pane);
+			if (button.dataset.pane === 'players') {
+				refreshPlayers();
+			}
+		});
+	});
+
+	connect();
+	// 画面が変わったら知らせる（ゲーム側が yaneuraContext を書き換える）
+	setInterval(function () {
+		const context = window.yaneuraContext;
+		// ビルド版はゲームの起動後に届くので、繋いだ時点では分からない。
+		// 分かった（変わった）時点で名乗り直して台帳を埋める
+		if (context.build && context.build !== sentBuild) {
+			sentBuild = context.build;
+			sendSocket({ t: 'hello', id: sessionId(), name: sessionName(), build: context.build });
+		}
+		if (context.screen && context.screen !== sentScreen) {
+			sentScreen = context.screen;
+			sendSocket({ t: 'screen', screen: context.screen, label: context.screenLabel });
+		}
+	}, 500);
+
+	window.addEventListener('resize', updateLayoutMode);
+	updateLayoutMode();
+	refresh();
+	// ビルド版はゲームの起動後に届く。最初の描画には間に合わないので、届いたら描き直す
+	setInterval(function () {
+		if (window.yaneuraContext.build !== lastBuild) render();
+	}, 1000);
+	// PCの常時パネルは、他の人の投稿や「改善済み」が入るので時々読み直す
+	setInterval(function () {
+		if (body.classList.contains('dock') || body.classList.contains('sheet-open')) refresh();
+	}, 60000);
+}());
+</script>
+</body>
+</html>
